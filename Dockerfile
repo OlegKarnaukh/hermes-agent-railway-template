@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates git ffmpeg && \
+    apt-get install -y --no-install-recommends curl ca-certificates git ffmpeg tini && \
     rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
@@ -34,4 +34,5 @@ RUN chmod +x /app/start.sh
 ENV HOME=/data
 ENV HERMES_HOME=/data/.hermes
 
+ENTRYPOINT ["tini", "--"]
 CMD ["/app/start.sh"]
