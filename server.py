@@ -63,6 +63,7 @@ ENV_VAR_DEFS = [
     ("BROWSERBASE_API_KEY", "Browserbase API Key", "tool", True),
     ("BROWSERBASE_PROJECT_ID", "Browserbase Project ID", "tool", False),
     ("GITHUB_TOKEN", "GitHub Token", "tool", True),
+    ("ANTHROPIC_API_KEY", "Anthropic API Key (Claude Code)", "tool", True),
     ("VOICE_TOOLS_OPENAI_KEY", "OpenAI Voice Key", "tool", True),
     ("HONCHO_API_KEY", "Honcho API Key", "tool", True),
     # Skills sync (pull skills/persona from a git repo on boot)
