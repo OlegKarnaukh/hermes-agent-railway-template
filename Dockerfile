@@ -16,6 +16,10 @@ RUN apt-get update && \
 
 RUN node --version && npm --version
 
+# Claude Code CLI — the coding engine Hermes delegates to (claude-code skill).
+# Authenticated at runtime via ANTHROPIC_API_KEY (set in Railway Variables).
+RUN npm install -g @anthropic-ai/claude-code && claude --version
+
 RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
     cd /tmp/hermes-agent && \
     uv pip install --system --no-cache -e ".[all]" && \
