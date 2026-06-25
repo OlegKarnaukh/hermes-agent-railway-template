@@ -615,6 +615,8 @@ def sync_skills_repo():
     def _scrub(text):
         return text.replace(token, "***") if token else text
 
+    print(f"[sync] repo={repo} branch={branch} token={'yes' if token else 'NO'}", flush=True)
+
     cache_dir = Path(HERMES_HOME) / "_sources" / "skills-repo"
     try:
         if (cache_dir / ".git").exists():
@@ -633,7 +635,13 @@ def sync_skills_repo():
         return
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        print(f"[sync] git failed: {_scrub(detail[-1] if detail else str(e))}", flush=True)
+        msg = _scrub(detail[-1] if detail else str(e))
+        if any(code in msg for code in ("403", "401", "Authentication failed")):
+            hint = ("GITHUB_TOKEN missing — private repos need a token"
+                    if not token else
+                    "GITHUB_TOKEN rejected — check it isn't expired and grants read access to this repo")
+            msg = f"{msg}  [hint: {hint}]"
+        print(f"[sync] git failed: {msg}", flush=True)
         return
     except Exception as e:
         print(f"[sync] error: {_scrub(str(e))}", flush=True)
