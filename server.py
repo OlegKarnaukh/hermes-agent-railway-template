@@ -63,7 +63,8 @@ ENV_VAR_DEFS = [
     ("BROWSERBASE_API_KEY", "Browserbase API Key", "tool", True),
     ("BROWSERBASE_PROJECT_ID", "Browserbase Project ID", "tool", False),
     ("GITHUB_TOKEN", "GitHub Token", "tool", True),
-    ("ANTHROPIC_API_KEY", "Anthropic API Key (Claude Code)", "tool", True),
+    ("CLAUDE_CODE_OAUTH_TOKEN", "Claude Code OAuth Token", "tool", True),
+    ("FLY_API_TOKEN", "Fly.io API Token", "tool", True),
     ("VOICE_TOOLS_OPENAI_KEY", "OpenAI Voice Key", "tool", True),
     ("HONCHO_API_KEY", "Honcho API Key", "tool", True),
     # Skills sync (pull skills/persona from a git repo on boot)
@@ -680,10 +681,45 @@ def sync_skills_repo():
     print(f"[sync] persona/context files: {', '.join(written) if written else 'none'}", flush=True)
 
 
+# Credentials the agent's tools need at runtime. Hermes only exposes its own
+# .env vars to tool subprocesses (not the raw container env), so we mirror these
+# from the process environment (e.g. Railway Variables) into HERMES_HOME/.env.
+# Deliberately excludes ANTHROPIC_API_KEY: Claude Code uses the Max subscription
+# via CLAUDE_CODE_OAUTH_TOKEN, and an API key would override it.
+AGENT_CRED_KEYS = [
+    "GITHUB_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "FLY_API_TOKEN",
+    "BROWSERBASE_API_KEY",
+    "BROWSERBASE_PROJECT_ID",
+]
+
+
+def sync_agent_credentials():
+    """Mirror credential env vars into HERMES_HOME/.env so the agent can use them.
+
+    Lets the operator manage every agent credential in one place (Railway
+    Variables); this copies them where Hermes will expose them to tool
+    subprocesses. Only writes non-empty values and only when something changed.
+    """
+    updates = {k: os.environ[k].strip() for k in AGENT_CRED_KEYS
+               if os.environ.get(k, "").strip()}
+    if not updates:
+        return
+    current = read_env_file(ENV_FILE_PATH)
+    changed = sorted(k for k, v in updates.items() if current.get(k) != v)
+    if not changed:
+        return
+    current.update(updates)
+    write_env_file(ENV_FILE_PATH, current)
+    print(f"[creds] mirrored to .env: {', '.join(changed)}", flush=True)
+
+
 async def _boot_sequence():
     # Runs as a background task so a slow clone never blocks startup/healthcheck.
     # The gateway starts only after the sync finishes, so it sees the synced skills.
     await asyncio.to_thread(sync_skills_repo)
+    await asyncio.to_thread(sync_agent_credentials)
     env_vars = read_env_file(ENV_FILE_PATH)
     if any(env_vars.get(key) for key in PROVIDER_KEYS):
         asyncio.create_task(gateway.start())
