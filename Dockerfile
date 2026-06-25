@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates git ffmpeg tini && \
+    apt-get install -y --no-install-recommends curl ca-certificates git ffmpeg tini jq ripgrep && \
     rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
@@ -17,8 +17,20 @@ RUN apt-get update && \
 RUN node --version && npm --version
 
 # Claude Code CLI — the coding engine Hermes delegates to (claude-code skill).
-# Authenticated at runtime via ANTHROPIC_API_KEY (set in Railway Variables).
+# Authenticated at runtime via CLAUDE_CODE_OAUTH_TOKEN (Max subscription).
 RUN npm install -g @anthropic-ai/claude-code && claude --version
+
+# GitHub CLI (gh) — used by the agent for PRs/issues/repo ops.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
+# flyctl — deploy target (fly deploy). Installs to /usr/local/bin.
+RUN curl -L https://fly.io/install.sh | FLYCTL_INSTALL=/usr/local sh && flyctl version
 
 RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
     cd /tmp/hermes-agent && \
