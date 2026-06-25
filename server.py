@@ -4,7 +4,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
+import subprocess
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -63,6 +65,9 @@ ENV_VAR_DEFS = [
     ("GITHUB_TOKEN", "GitHub Token", "tool", True),
     ("VOICE_TOOLS_OPENAI_KEY", "OpenAI Voice Key", "tool", True),
     ("HONCHO_API_KEY", "Honcho API Key", "tool", True),
+    # Skills sync (pull skills/persona from a git repo on boot)
+    ("SKILLS_SYNC_REPO", "Skills Sync Repo (owner/name or URL)", "tool", False),
+    ("SKILLS_SYNC_REF", "Skills Sync Branch", "tool", False),
     # Messaging — Telegram
     ("TELEGRAM_BOT_TOKEN", "Telegram Bot Token", "messaging", True),
     ("TELEGRAM_ALLOWED_USERS", "Telegram Allowed Users", "messaging", False),
@@ -570,7 +575,91 @@ async def api_pairing_revoke(request: Request):
     return JSONResponse({"ok": True})
 
 
+# Hermes-native files synced verbatim from the source repo root, if present.
+SYNC_ROOT_FILES = ["SOUL.md", "AGENTS.md", "MEMORY.md", "USER.md"]
+
+
+def sync_skills_repo():
+    """Pull skills/persona from a git repo onto the Hermes volume before boot.
+
+    Opt-in: no-op unless SKILLS_SYNC_REPO is set. The repo is cloned/updated
+    under $HERMES_HOME/_sources/skills-repo; its `skills/*` entries are copied
+    into $HERMES_HOME/skills/, and any Hermes-native root files (SOUL.md,
+    AGENTS.md, MEMORY.md, USER.md) are copied to $HERMES_HOME/. Fail-safe:
+    logs and returns on any error so a sync failure never blocks the gateway.
+    """
+    env_vars = read_env_file(ENV_FILE_PATH)
+    repo = env_vars.get("SKILLS_SYNC_REPO", "").strip()
+    if not repo:
+        return
+    ref = env_vars.get("SKILLS_SYNC_REF", "").strip() or "main"
+    token = env_vars.get("GITHUB_TOKEN", "").strip()
+
+    if repo.startswith(("http://", "https://")):
+        repo_url = repo
+    else:
+        repo_url = f"https://github.com/{repo}.git"
+    if token and repo_url.startswith("https://github.com/"):
+        repo_url = repo_url.replace("https://", f"https://x-access-token:{token}@", 1)
+
+    cache_dir = Path(HERMES_HOME) / "_sources" / "skills-repo"
+    try:
+        if (cache_dir / ".git").exists():
+            subprocess.run(["git", "-C", str(cache_dir), "fetch", "--depth", "1", "origin", ref],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(cache_dir), "reset", "--hard", f"origin/{ref}"],
+                           check=True, capture_output=True)
+        else:
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "clone", "--depth", "1", "--branch", ref, repo_url, str(cache_dir)],
+                           check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        # Avoid leaking the tokenized URL in logs.
+        msg = (detail[-1] if detail else str(e)).replace(token, "***") if token else (detail[-1] if detail else str(e))
+        print(f"[sync] git failed: {msg}", flush=True)
+        return
+    except Exception as e:
+        print(f"[sync] error: {e}", flush=True)
+        return
+
+    count = 0
+    src_skills = cache_dir / "skills"
+    if src_skills.is_dir():
+        dst_skills = Path(HERMES_HOME) / "skills"
+        dst_skills.mkdir(parents=True, exist_ok=True)
+        for item in src_skills.iterdir():
+            if item.name.startswith("."):
+                continue
+            dst = dst_skills / item.name
+            try:
+                if item.is_dir():
+                    if dst.exists():
+                        shutil.rmtree(dst)
+                    shutil.copytree(item, dst)
+                    count += 1
+                elif item.is_file():
+                    shutil.copy2(item, dst)
+                    count += 1
+            except Exception as e:
+                print(f"[sync] skill '{item.name}' failed: {e}", flush=True)
+
+    for name in SYNC_ROOT_FILES:
+        src = cache_dir / name
+        if src.is_file():
+            try:
+                shutil.copy2(src, Path(HERMES_HOME) / name)
+                print(f"[sync] wrote {name}", flush=True)
+            except Exception as e:
+                print(f"[sync] '{name}' failed: {e}", flush=True)
+
+    print(f"[sync] synced {count} skill entries from {repo}@{ref}", flush=True)
+
+
 async def auto_start_gateway():
+    await asyncio.to_thread(sync_skills_repo)
     env_vars = read_env_file(ENV_FILE_PATH)
     has_provider = any(env_vars.get(key) for key in PROVIDER_KEYS)
     if has_provider:
