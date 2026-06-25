@@ -591,15 +591,19 @@ def sync_skills_repo():
     GIT_TIMEOUT and any error is logged and swallowed, so a sync failure can
     never block server startup or the gateway.
     """
-    env_vars = read_env_file(ENV_FILE_PATH)
-    repo = env_vars.get("SKILLS_SYNC_REPO", "").strip()
+    file_vars = read_env_file(ENV_FILE_PATH)
+
+    def cfg(key):
+        # Railway Variables land in os.environ; the admin UI writes the .env
+        # file. Read both so the sync works no matter where vars are set.
+        return (os.environ.get(key) or file_vars.get(key) or "").strip()
+
+    repo = cfg("SKILLS_SYNC_REPO")
     if not repo:
         return
     # SKILLS_SYNC_BRANCH is the documented name; SKILLS_SYNC_REF kept as alias.
-    branch = (env_vars.get("SKILLS_SYNC_BRANCH", "").strip()
-              or env_vars.get("SKILLS_SYNC_REF", "").strip()
-              or "main")
-    token = env_vars.get("GITHUB_TOKEN", "").strip()
+    branch = cfg("SKILLS_SYNC_BRANCH") or cfg("SKILLS_SYNC_REF") or "main"
+    token = cfg("GITHUB_TOKEN")
 
     if "://" in repo or repo.startswith("/"):
         repo_url = repo  # full URL (https/ssh/file) or local path, used as-is
