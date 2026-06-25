@@ -67,7 +67,7 @@ ENV_VAR_DEFS = [
     ("HONCHO_API_KEY", "Honcho API Key", "tool", True),
     # Skills sync (pull skills/persona from a git repo on boot)
     ("SKILLS_SYNC_REPO", "Skills Sync Repo (owner/name or URL)", "tool", False),
-    ("SKILLS_SYNC_REF", "Skills Sync Branch", "tool", False),
+    ("SKILLS_SYNC_BRANCH", "Skills Sync Branch", "tool", False),
     # Messaging — Telegram
     ("TELEGRAM_BOT_TOKEN", "Telegram Bot Token", "messaging", True),
     ("TELEGRAM_ALLOWED_USERS", "Telegram Allowed Users", "messaging", False),
@@ -577,93 +577,107 @@ async def api_pairing_revoke(request: Request):
 
 # Hermes-native files synced verbatim from the source repo root, if present.
 SYNC_ROOT_FILES = ["SOUL.md", "AGENTS.md", "MEMORY.md", "USER.md"]
+GIT_TIMEOUT = 60  # seconds; keep boot-time clone/pull within the healthcheck window
 
 
 def sync_skills_repo():
-    """Pull skills/persona from a git repo onto the Hermes volume before boot.
+    """Pull skills/persona from a git repo onto the Hermes volume.
 
     Opt-in: no-op unless SKILLS_SYNC_REPO is set. The repo is cloned/updated
-    under $HERMES_HOME/_sources/skills-repo; its `skills/*` entries are copied
-    into $HERMES_HOME/skills/, and any Hermes-native root files (SOUL.md,
-    AGENTS.md, MEMORY.md, USER.md) are copied to $HERMES_HOME/. Fail-safe:
-    logs and returns on any error so a sync failure never blocks the gateway.
+    under $HERMES_HOME/_sources/skills-repo; each `skills/*/` subdirectory that
+    contains a SKILL.md is copied into $HERMES_HOME/skills/, and any
+    Hermes-native root files (SOUL.md, AGENTS.md, MEMORY.md, USER.md) are
+    copied to $HERMES_HOME/. Fully fail-safe: every git call is bounded by
+    GIT_TIMEOUT and any error is logged and swallowed, so a sync failure can
+    never block server startup or the gateway.
     """
     env_vars = read_env_file(ENV_FILE_PATH)
     repo = env_vars.get("SKILLS_SYNC_REPO", "").strip()
     if not repo:
         return
-    ref = env_vars.get("SKILLS_SYNC_REF", "").strip() or "main"
+    # SKILLS_SYNC_BRANCH is the documented name; SKILLS_SYNC_REF kept as alias.
+    branch = (env_vars.get("SKILLS_SYNC_BRANCH", "").strip()
+              or env_vars.get("SKILLS_SYNC_REF", "").strip()
+              or "main")
     token = env_vars.get("GITHUB_TOKEN", "").strip()
 
-    if repo.startswith(("http://", "https://")):
-        repo_url = repo
+    if "://" in repo or repo.startswith("/"):
+        repo_url = repo  # full URL (https/ssh/file) or local path, used as-is
     else:
-        repo_url = f"https://github.com/{repo}.git"
+        repo_url = f"https://github.com/{repo}.git"  # bare owner/name shorthand
     if token and repo_url.startswith("https://github.com/"):
         repo_url = repo_url.replace("https://", f"https://x-access-token:{token}@", 1)
+
+    def _scrub(text):
+        return text.replace(token, "***") if token else text
 
     cache_dir = Path(HERMES_HOME) / "_sources" / "skills-repo"
     try:
         if (cache_dir / ".git").exists():
-            subprocess.run(["git", "-C", str(cache_dir), "fetch", "--depth", "1", "origin", ref],
-                           check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(cache_dir), "reset", "--hard", f"origin/{ref}"],
-                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(cache_dir), "fetch", "--depth", "1", "origin", branch],
+                           check=True, capture_output=True, timeout=GIT_TIMEOUT)
+            subprocess.run(["git", "-C", str(cache_dir), "reset", "--hard", f"origin/{branch}"],
+                           check=True, capture_output=True, timeout=GIT_TIMEOUT)
         else:
             if cache_dir.exists():
                 shutil.rmtree(cache_dir)
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "clone", "--depth", "1", "--branch", ref, repo_url, str(cache_dir)],
-                           check=True, capture_output=True)
+            subprocess.run(["git", "clone", "--depth", "1", "--branch", branch, repo_url, str(cache_dir)],
+                           check=True, capture_output=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"[sync] git timed out after {GIT_TIMEOUT}s; skipping sync", flush=True)
+        return
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        # Avoid leaking the tokenized URL in logs.
-        msg = (detail[-1] if detail else str(e)).replace(token, "***") if token else (detail[-1] if detail else str(e))
-        print(f"[sync] git failed: {msg}", flush=True)
+        print(f"[sync] git failed: {_scrub(detail[-1] if detail else str(e))}", flush=True)
         return
     except Exception as e:
-        print(f"[sync] error: {e}", flush=True)
+        print(f"[sync] error: {_scrub(str(e))}", flush=True)
         return
 
+    # Skills: only copy skills/<name>/ subdirs that contain a SKILL.md.
     count = 0
     src_skills = cache_dir / "skills"
     if src_skills.is_dir():
         dst_skills = Path(HERMES_HOME) / "skills"
         dst_skills.mkdir(parents=True, exist_ok=True)
-        for item in src_skills.iterdir():
-            if item.name.startswith("."):
-                continue
+        for item in sorted(src_skills.iterdir()):
+            if not item.is_dir() or not (item / "SKILL.md").is_file():
+                continue  # skip loose files (e.g. skills/README.md) and dirs without a manifest
             dst = dst_skills / item.name
             try:
-                if item.is_dir():
-                    if dst.exists():
-                        shutil.rmtree(dst)
-                    shutil.copytree(item, dst)
-                    count += 1
-                elif item.is_file():
-                    shutil.copy2(item, dst)
-                    count += 1
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(item, dst)
+                count += 1
             except Exception as e:
                 print(f"[sync] skill '{item.name}' failed: {e}", flush=True)
+    print(f"[sync] synced {count} skill entries from {repo}@{branch}", flush=True)
 
+    # Persona / context files from the repo root.
+    written = []
     for name in SYNC_ROOT_FILES:
         src = cache_dir / name
         if src.is_file():
             try:
                 shutil.copy2(src, Path(HERMES_HOME) / name)
-                print(f"[sync] wrote {name}", flush=True)
+                written.append(name)
             except Exception as e:
                 print(f"[sync] '{name}' failed: {e}", flush=True)
+    print(f"[sync] persona/context files: {', '.join(written) if written else 'none'}", flush=True)
 
-    print(f"[sync] synced {count} skill entries from {repo}@{ref}", flush=True)
+
+async def _boot_sequence():
+    # Runs as a background task so a slow clone never blocks startup/healthcheck.
+    # The gateway starts only after the sync finishes, so it sees the synced skills.
+    await asyncio.to_thread(sync_skills_repo)
+    env_vars = read_env_file(ENV_FILE_PATH)
+    if any(env_vars.get(key) for key in PROVIDER_KEYS):
+        asyncio.create_task(gateway.start())
 
 
 async def auto_start_gateway():
-    await asyncio.to_thread(sync_skills_repo)
-    env_vars = read_env_file(ENV_FILE_PATH)
-    has_provider = any(env_vars.get(key) for key in PROVIDER_KEYS)
-    if has_provider:
-        asyncio.create_task(gateway.start())
+    asyncio.create_task(_boot_sequence())
 
 
 routes = [
