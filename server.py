@@ -227,26 +227,26 @@ class GatewayManager:
             env["HERMES_HOME"] = HERMES_HOME
             env_vars = read_env_file(ENV_FILE_PATH)
             env.update(env_vars)
-        # FIX: Hermes reads the model only from config.yaml, not from env.
-        # Sync LLM_MODEL (.env) -> config.yaml `model` before launching the gateway.
-        _model = env_vars.get("LLM_MODEL", "").strip()
-        if _model:
-            try:
-                import yaml
-                _cfg_path = Path(HERMES_HOME) / "config.yaml"
-                _cfg = {}
-                if _cfg_path.exists():
-                    _cfg = yaml.safe_load(_cfg_path.read_text()) or {}
-                if _cfg.get("model") != _model:
-                    _cfg["model"] = _model
-                    _cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                    _cfg_path.write_text(
-                        yaml.safe_dump(_cfg, allow_unicode=True, sort_keys=False)
-                    )
-                    print(f"[patch] wrote model={_model} to {_cfg_path}", flush=True)
-            except Exception as _e:
-                print(f"[patch] failed to set model in config.yaml: {_e}", flush=True)
-                
+            # FIX: Hermes reads the model only from config.yaml, not from env.
+            # Sync LLM_MODEL (.env) -> config.yaml `model` before launching the gateway.
+            _model = env_vars.get("LLM_MODEL", "").strip()
+            if _model:
+                try:
+                    import yaml
+                    _cfg_path = Path(HERMES_HOME) / "config.yaml"
+                    _cfg = {}
+                    if _cfg_path.exists():
+                        _cfg = yaml.safe_load(_cfg_path.read_text()) or {}
+                    if _cfg.get("model") != _model:
+                        _cfg["model"] = _model
+                        _cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                        _cfg_path.write_text(
+                            yaml.safe_dump(_cfg, allow_unicode=True, sort_keys=False)
+                        )
+                        print(f"[patch] wrote model={_model} to {_cfg_path}", flush=True)
+                except Exception as _e:
+                    print(f"[patch] failed to set model in config.yaml: {_e}", flush=True)
+
             self.process = await asyncio.create_subprocess_exec(
                 "hermes", "gateway",
                 stdout=asyncio.subprocess.PIPE,
